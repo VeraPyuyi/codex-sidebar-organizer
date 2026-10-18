@@ -127,6 +127,7 @@ def smoke(path, script_relative):
         safe_after_path.write_text(json.dumps(safe_after), encoding="utf-8")
         journal = {"schemaVersion": 2, "operations": [
             {"operationId": t["operationId"], "state": "confirmed", "sectionId": next(s["sectionId"] for s in safe_after["sidebar"]["sections"] if s["name"] == t["name"])} for t in safe["targets"]]}
+        journal["operations"].extend({"operationId": m["operationId"], "state": "confirmed"} for m in safe["moves"])
         journal_path = directory / "journal.json"
         journal_path.write_text(json.dumps(journal), encoding="utf-8")
         receipt_path = directory / "receipt.json"

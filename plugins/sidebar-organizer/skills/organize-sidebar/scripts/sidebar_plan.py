@@ -555,7 +555,7 @@ TOOL_FIELDS = {
     "list_threads": ["limit"], "list_projects": [],
     "create_sidebar_section": ["name"],
     "move_project_to_sidebar_section": ["projectId", "sectionId"],
-    "move_thread_to_sidebar_section": ["threadId", "source", "sectionId"],
+    "move_thread_to_sidebar_section": ["threadId", "source", "hostId", "sectionId"],
 }
 
 
@@ -749,12 +749,12 @@ def reconcile_receipt(before, current, plan, journal=None):
             state, reason = "unknown", "identity_or_metadata_changed"
         elif (key in {r["key"] for r in old["cloud_resolved"]} and key not in {r["key"] for r in new["cloud_resolved"]}) or new["alias_hosts"] or blocked(key.split(":", 1)[0], row.get("hostId"), new):
             state, reason = "unknown", "fresh_identity_unavailable"
-        elif sid and places == [sid]:
+        elif sid and places == [sid] and entry:
             state, reason = "confirmed", "id_readback"
             confirmed.append({**move, "confirmedTargetId": sid})
         elif places != [move["fromSection"]]:
             state, reason = "unknown", "user_moved"
-        elif entry.get("state") in {"unknown", "confirmed"}:
+        elif entry:
             state, reason = "unknown", "write_outcome_unknown"
         elif move["expectedTargetId"] and not sid:
             state, reason = "unknown", "target_disappeared"
@@ -765,6 +765,11 @@ def reconcile_receipt(before, current, plan, journal=None):
     # Legacy verifier still guards protected metadata, unrelated placements and preference changes.
     safety = verify(before, current, build_plan(before, plan["language"]))
     safety_errors = [e for e in safety["errors"] if not e.startswith("destination_not_verified:") and e != "unrelated_section_order_changed"]
+    moved = {m["key"] for m in plan["moves"]}
+    for key, places in old["locations"].items():
+        error = f"unplanned_placement_change:{key}"
+        if key not in moved and places != new["locations"].get(key, []) and error not in safety_errors:
+            safety_errors.append(error)
     managed_ids = set(destinations.values())
     def unrelated_ids(data):
         return [sid for sid in data["sections"] if sid not in DEFAULTS | {"pinned"} and sid not in managed_ids]
@@ -778,14 +783,27 @@ def reconcile_receipt(before, current, plan, journal=None):
     if actual is not None and (type(actual) is not int or actual < 0):
         raise ValueError("Actual tool count must be a nonnegative integer")
     limit = plan["budget"]["limit"]
-    sufficient = plan["budget"]["sufficient"] and (limit is None or actual is None or actual <= limit)
+    budget_reason = None
+    if limit is not None and actual is not None and actual > limit:
+        budget_reason = "actual_tool_calls_exceed_budget"
+    elif not plan["budget"]["sufficient"]:
+        budget_reason = "estimated_tool_calls_exceed_budget"
+    elif limit is not None and actual is None:
+        budget_reason = "actual_tool_calls_unknown"
+    sufficient = budget_reason is None
     blocking_unknown = [reason for reason in safety["unverified"] if reason not in {
         "plan_contains_skipped_items", "managed_section_order_or_creation_not_verified", "recency_sorting_not_verified"}]
-    success = bool(plan["moves"]) and len(confirmed) == len(plan["moves"]) and not safety_errors and not blocking_unknown and sufficient
+    if not sufficient:
+        blocking_unknown.append(budget_reason)
+        confirmed = []
+        rows = [{**r, "state": "unknown", "reason": budget_reason} if r["state"] == "confirmed" else r for r in rows]
+    success = (bool(plan["moves"]) and len(confirmed) == len(plan["moves"])
+               and all(r["state"] == "confirmed" for r in rows)
+               and not safety_errors and not blocking_unknown and sufficient)
     return {"schemaVersion": 2, "unverified": blocking_unknown, "planSha256": fingerprint(plan), "status": "confirmed" if success else "unverified",
             "operations": rows, "retryable": retryable if sufficient and not safety_errors else [],
             "confirmedMoves": confirmed if not safety_errors else [], "errors": safety_errors,
-            "budget": {**plan["budget"], "actualToolCalls": journal.get("actualToolCalls")},
+            "budget": {**plan["budget"], "actualToolCalls": actual, "sufficient": sufficient, "reason": budget_reason},
             "coverage": {**plan["coverage"], "proven": [m["key"] for m in confirmed] if not safety_errors else [],
                          "unverified": [r for r in rows if r["state"] != "confirmed"], "complete": False}}
 
@@ -815,6 +833,10 @@ def undo_plan(before, current, plan, receipt, can_move_back=False):
               or key in new["duplicates"] or row.get("projectId") and move["entity"] == "chat"
               or places != [move.get("confirmedTargetId")] or move["fromSection"] not in new["sections"]):
             skipped.append({"key": key, "reason": "current_relation_or_protection_changed"})
+        elif (blocked(key.split(":", 1)[0], row.get("hostId"), new) or new["alias_hosts"]
+              or (row.get("kind") == "codex" and row.get("hostId") == "durable"
+                  and key not in {r["key"] for r in new["cloud_resolved"]})):
+            skipped.append({"key": key, "reason": "fresh_identity_unavailable"})
         else:
             moves.append({**original, "fromSection": move["confirmedTargetId"], "expectedTargetId": move["fromSection"],
                           "operationId": fingerprint(["undo", move["operationId"]])})

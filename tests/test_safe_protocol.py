@@ -78,6 +78,7 @@ class SafeProtocolTests(unittest.TestCase):
         for t in plan['targets']:
             sid = next(s['sectionId'] for s in after['sidebar']['sections'] if s['name'] == t['name'])
             creates.append({'operationId': t['operationId'], 'state': 'confirmed', 'sectionId': sid})
+        creates.extend({'operationId': m['operationId'], 'state': 'confirmed'} for m in plan['moves'])
         journal = {'schemaVersion': 2, 'operations': creates, 'actualToolCalls': 12}
         result = p.reconcile_receipt(before, after, plan, journal)
         self.assertEqual(len(result['confirmedMoves']), 5)
@@ -92,6 +93,7 @@ class SafeProtocolTests(unittest.TestCase):
         self.assertTrue(hasattr(p, 'undo_plan'), 'missing undo')
         before = fixture(); plan = p.safe_plan(before); after = simulate(before, plan)
         ops = [{'operationId': t['operationId'], 'state': 'confirmed', 'sectionId': next(s['sectionId'] for s in after['sidebar']['sections'] if s['name'] == t['name'])} for t in plan['targets']]
+        ops.extend({'operationId': m['operationId'], 'state': 'confirmed'} for m in plan['moves'])
         journal = {'schemaVersion': 2, 'operations': ops}
         receipt = p.reconcile_receipt(before, after, plan, journal)
         undo = p.undo_plan(before, after, plan, receipt, can_move_back=True)
@@ -133,10 +135,11 @@ class SafeProtocolTests(unittest.TestCase):
     def test_partial_interruption_unknown_move_and_target_disappearance(self):
         before = fixture(); plan = p.safe_plan(before); after = simulate(before, plan)
         ops = [{'operationId': t['operationId'], 'state': 'confirmed', 'sectionId': next(s['sectionId'] for s in after['sidebar']['sections'] if s['name'] == t['name'])} for t in plan['targets']]
+        ops.extend({'operationId': m['operationId'], 'state': 'confirmed'} for m in plan['moves'])
         move = plan['moves'][0]; key = move['key']
         for section in after['sidebar']['sections']: section['itemKeys'] = [k for k in section['itemKeys'] if k != key]
         next(s for s in after['sidebar']['sections'] if s['sectionId'] == move['fromSection'])['itemKeys'].append(key)
-        ops.append({'operationId': move['operationId'], 'state': 'unknown'})
+        next(r for r in ops if r['operationId'] == move['operationId'])['state'] = 'unknown'
         result = p.reconcile_receipt(before, after, plan, {'schemaVersion': 2, 'operations': ops})
         self.assertEqual(result['status'], 'unverified')
         self.assertEqual(len(result['confirmedMoves']), 4)
@@ -152,6 +155,7 @@ class SafeProtocolTests(unittest.TestCase):
     def test_undo_rejects_changed_host_and_cloud_evidence(self):
         before = fixture(); plan = p.safe_plan(before); after = simulate(before, plan)
         ops = [{'operationId': t['operationId'], 'state': 'confirmed', 'sectionId': next(s['sectionId'] for s in after['sidebar']['sections'] if s['name'] == t['name'])} for t in plan['targets']]
+        ops.extend({'operationId': m['operationId'], 'state': 'confirmed'} for m in plan['moves'])
         receipt = p.reconcile_receipt(before, after, plan, {'schemaVersion': 2, 'operations': ops})
         # Capability disappearance must stop every reverse action.
         after['capabilities'] = {'adapter': 'future', 'tools': {}, 'defaultSectionIds': []}
@@ -170,6 +174,7 @@ class SafeProtocolTests(unittest.TestCase):
         after = simulate(before, plan)
         after['sidebar']['sidebarPreferences']['sorting']['chats'] = 'manual'
         ops = [{'operationId': t['operationId'], 'state': 'confirmed', 'sectionId': next(s['sectionId'] for s in after['sidebar']['sections'] if s['name'] == t['name'])} for t in plan['targets']]
+        ops.extend({'operationId': m['operationId'], 'state': 'confirmed'} for m in plan['moves'])
         self.assertEqual(p.reconcile_receipt(before, after, plan, {'schemaVersion': 2, 'operations': ops})['status'], 'confirmed')
         after['sidebar']['sidebarPreferences']['sorting']['chats'] = 'updated_at'
         self.assertEqual(p.reconcile_receipt(before, after, plan, {'schemaVersion': 2, 'operations': ops})['status'], 'unverified')
@@ -177,12 +182,14 @@ class SafeProtocolTests(unittest.TestCase):
     def test_actual_budget_exhaustion_and_undo_fresh_cloud_identity(self):
         before = fixture(); plan = p.safe_plan(before, budget=100); after = simulate(before, plan)
         ops = [{'operationId': t['operationId'], 'state': 'confirmed', 'sectionId': next(s['sectionId'] for s in after['sidebar']['sections'] if s['name'] == t['name'])} for t in plan['targets']]
+        ops.extend({'operationId': m['operationId'], 'state': 'confirmed'} for m in plan['moves'])
         result = p.reconcile_receipt(before, after, plan, {'schemaVersion': 2, 'operations': ops, 'actualToolCalls': 101})
         self.assertEqual(result['status'], 'unverified')
         from test_sidebar_plan import cloud_fixture
         raw, reads = cloud_fixture(); before = p.capture_cloud(raw, reads); plan = p.safe_plan(before)
         after = p.capture_cloud(simulate(raw, plan), reads)
         ops = [{'operationId': t['operationId'], 'state': 'confirmed', 'sectionId': next(s['sectionId'] for s in after['sidebar']['sections'] if s['name'] == t['name'])} for t in plan['targets']]
+        ops.extend({'operationId': m['operationId'], 'state': 'confirmed'} for m in plan['moves'])
         receipt = p.reconcile_receipt(before, after, plan, {'schemaVersion': 2, 'operations': ops})
         self.assertEqual(len(receipt['confirmedMoves']), 6)
         after.pop('cloudEvidence')
@@ -192,6 +199,7 @@ class SafeProtocolTests(unittest.TestCase):
     def test_new_records_and_aliases_keep_overall_receipt_unverified(self):
         before = fixture(); plan = p.safe_plan(before); after = simulate(before, plan)
         ops = [{'operationId': t['operationId'], 'state': 'confirmed', 'sectionId': next(s['sectionId'] for s in after['sidebar']['sections'] if s['name'] == t['name'])} for t in plan['targets']]
+        ops.extend({'operationId': m['operationId'], 'state': 'confirmed'} for m in plan['moves'])
         after['sidebar']['threads'].append({'id': 'new-concurrent', 'kind': 'chatgpt'})
         after['sidebar']['sections'][4]['itemKeys'].append('chatgpt:conversation:new-concurrent')
         receipt = p.reconcile_receipt(before, after, plan, {'schemaVersion': 2, 'operations': ops})
@@ -211,6 +219,7 @@ class SafeProtocolTests(unittest.TestCase):
             plan_path, after_path, journal_path = Path(tmp)/'plan.json', Path(tmp)/'after.json', Path(tmp)/'journal.json'
             plan_path.write_text(json.dumps(plan), encoding='utf-8'); after_path.write_text(json.dumps(after), encoding='utf-8')
             ops = [{'operationId': t['operationId'], 'state': 'confirmed', 'sectionId': next(s['sectionId'] for s in after['sidebar']['sections'] if s['name'] == t['name'])} for t in plan['targets']]
+            ops.extend({'operationId': m['operationId'], 'state': 'confirmed'} for m in plan['moves'])
             journal_path.write_text(json.dumps({'schemaVersion': 2, 'operations': ops}), encoding='utf-8')
             receipt_cmd = [sys.executable, str(SCRIPT), 'receipt', '--before', str(source), '--after', str(after_path), '--plan', str(plan_path), '--journal', str(journal_path), '--output', str(Path(tmp)/'receipt.json')]
             self.assertEqual(subprocess.run(receipt_cmd, capture_output=True).returncode, 0)
