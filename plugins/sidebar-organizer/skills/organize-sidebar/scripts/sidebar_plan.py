@@ -797,8 +797,12 @@ def reconcile_receipt(before, current, plan, journal=None):
         blocking_unknown.append(budget_reason)
         confirmed = []
         rows = [{**r, "state": "unknown", "reason": budget_reason} if r["state"] == "confirmed" else r for r in rows]
+    needed_categories = {m["category"] for m in plan["moves"]}
+    required_targets = {t["operationId"] for t in plan["targets"]
+                        if t["category"] in needed_categories or plan["options"]["config"].get("createEmptyGroups", False)}
+    # Keep unrelated target diagnostics without making them prerequisites for this run.
     success = (bool(plan["moves"]) and len(confirmed) == len(plan["moves"])
-               and all(r["state"] == "confirmed" for r in rows)
+               and all(r["state"] == "confirmed" for r in rows if r["operationId"] in required_targets)
                and not safety_errors and not blocking_unknown and sufficient)
     return {"schemaVersion": 2, "unverified": blocking_unknown, "planSha256": fingerprint(plan), "status": "confirmed" if success else "unverified",
             "operations": rows, "retryable": retryable if sufficient and not safety_errors else [],

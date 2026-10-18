@@ -132,6 +132,58 @@ class ReviewRegressionTests(unittest.TestCase):
                 self.assertEqual(receipt['confirmedMoves'], [])
                 self.assertEqual(receipt['coverage']['proven'], [])
 
+    def test_unrelated_ambiguous_empty_group_does_not_block_confirmed_moves(self):
+        before = fixture()
+        before['sidebar']['sections'].extend(
+            {'sectionId': f'empty-{i}', 'name': p.LABELS['zh'][4], 'itemKeys': []}
+            for i in range(2))
+        plan = p.safe_plan(before)
+        target = next(t for t in plan['targets'] if t['category'] == 'unconfirmed')
+        self.assertEqual(target['state'], 'ambiguous')
+        self.assertIsNone(target['sectionId'])
+        after = simulate(before, plan)
+        receipt = p.reconcile_receipt(before, after, plan, {
+            'schemaVersion': 2, 'operations': recorded_operations(plan, after)})
+        self.assertEqual(receipt['errors'], [])
+        self.assertEqual(receipt['unverified'], [])
+        self.assertEqual(len(receipt['confirmedMoves']), 5)
+        self.assertEqual(set(receipt['coverage']['proven']), {m['key'] for m in plan['moves']})
+        diagnostic = next(r for r in receipt['coverage']['unverified']
+                          if r['operationId'] == target['operationId'])
+        self.assertEqual(diagnostic['state'], 'unknown')
+        self.assertEqual(diagnostic['reason'], 'creation_or_target_unverified')
+        self.assertIsNone(diagnostic['sectionId'])
+        self.assertEqual(receipt['status'], 'confirmed')
+
+    def test_unrelated_missing_target_does_not_block_confirmed_moves(self):
+        before = fixture()
+        plan = p.safe_plan(before, mapping={'unconfirmed': 'missing-empty'})
+        target = next(t for t in plan['targets'] if t['category'] == 'unconfirmed')
+        self.assertEqual(target['state'], 'missing')
+        after = simulate(before, plan)
+        receipt = p.reconcile_receipt(before, after, plan, {
+            'schemaVersion': 2, 'operations': recorded_operations(plan, after)})
+        self.assertEqual(len(receipt['coverage']['proven']), 5)
+        self.assertTrue(any(r['operationId'] == target['operationId'] and r['state'] == 'unknown'
+                            for r in receipt['coverage']['unverified']))
+        self.assertEqual(receipt['status'], 'confirmed')
+
+    def test_required_target_without_confirmation_blocks_overall_confirmation(self):
+        before = fixture()
+        plan = p.safe_plan(before)
+        after = simulate(before, plan)
+        target = next(t for t in plan['targets'] if t['category'] == 'local.chats')
+        operations = [r for r in recorded_operations(plan, after)
+                      if r['operationId'] != target['operationId']]
+        receipt = p.reconcile_receipt(before, after, plan, {
+            'schemaVersion': 2, 'operations': operations})
+        self.assertEqual(receipt['status'], 'unverified')
+        self.assertEqual(receipt['confirmedMoves'], [])
+        self.assertEqual(receipt['coverage']['proven'], [])
+        self.assertTrue(any(r['operationId'] == target['operationId'] and r['state'] == 'unknown'
+                            for r in receipt['coverage']['unverified']))
+        self.assertFalse(any(m['category'] == target['category'] for m in receipt['confirmedMoves']))
+
     def test_unknown_requested_empty_group_prevents_overall_confirmation(self):
         before = fixture()
         plan = p.safe_plan(before, config={'version': 1, 'createEmptyGroups': True})
