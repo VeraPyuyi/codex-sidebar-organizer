@@ -548,6 +548,280 @@ def refresh_check(snapshot, previous=None):
             "notice": "List absence, missing reads, and removed memberships do not prove deletion. Native caching may apply; no application state was changed."}
 
 
+RULE_VERSION = "source-protection-1"
+CAPABILITY_VERSION = "native-v1"
+CATEGORIES = ["local.projects", "chatgpt.projects", "local.chats", "chatgpt.chats", "unconfirmed"]
+TOOL_FIELDS = {
+    "list_threads": ["limit"], "list_projects": [],
+    "create_sidebar_section": ["name"],
+    "move_project_to_sidebar_section": ["projectId", "sectionId"],
+    "move_thread_to_sidebar_section": ["threadId", "source", "sectionId"],
+}
+
+
+def diagnose(snapshot):
+    """Inspect supplied metadata only; unknown versions are never inferred."""
+    reasons, blocking = [], []
+    caps = snapshot.get("capabilities") if isinstance(snapshot, dict) else None
+    if caps is None:
+        reasons.append("legacy_snapshot")
+    elif not isinstance(caps, dict):
+        blocking.append("unknown_adapter")
+        caps = {}
+    else:
+        if caps.get("adapter") != CAPABILITY_VERSION:
+            blocking.append("unknown_adapter")
+        defaults = caps.get("defaultSectionIds")
+        if not isinstance(defaults, list) or not all(stable(v) for v in defaults) or set(defaults) != DEFAULTS:
+            blocking.append("unknown_default_sections")
+        tools = caps.get("tools", {})
+        if not isinstance(tools, dict):
+            tools = {}
+        for name, fields in TOOL_FIELDS.items():
+            if name not in tools:
+                blocking.append("missing_tool:" + name)
+            elif not isinstance(tools[name], list) or not set(fields).issubset(tools[name]):
+                blocking.append("tool_schema_mismatch:" + name)
+    try:
+        index(snapshot)
+    except (ValueError, TypeError, KeyError):
+        blocking.append("schema_mismatch")
+    return {"schemaVersion": 1, "adapter": CAPABILITY_VERSION,
+            "clientVersion": (caps or {}).get("clientVersion", "unknown"),
+            "canPlanMoves": not blocking, "reasons": reasons + blocking,
+            "status": "degraded" if blocking else "legacy" if caps is None else "ready"}
+
+
+def parse_config(config):
+    config = {} if config is None else config
+    allowed = {"version", "sources", "hosts", "excludeIds", "labels", "createEmptyGroups", "sort"}
+    if not isinstance(config, dict) or set(config) - allowed or config.get("version", 1) != 1:
+        raise ValueError("Unsupported config fields/version")
+    for field in ("sources", "hosts", "excludeIds"):
+        if field in config and (not isinstance(config[field], list) or not all(stable(v) for v in config[field])):
+            raise ValueError("Config scope must be explicit string arrays")
+    if set(config.get("sources", [])) - {"codex", "chatgpt"}:
+        raise ValueError("Unknown source")
+    if type(config.get("createEmptyGroups", False)) is not bool:
+        raise ValueError("createEmptyGroups must be boolean")
+    if config.get("sort", "updated_at") not in {"updated_at", "manual"}:
+        raise ValueError("Unsupported sorting")
+    labels = config.get("labels", {})
+    if not isinstance(labels, dict) or any(k not in CATEGORIES and k != "codex.cloud.chats" and not re.fullmatch(r"remote\.[^.]+\.(projects|chats)", k) for k in labels):
+        raise ValueError("Unknown category label")
+    if not all(stable(v) for v in labels.values()) or len(set(labels.values())) != len(labels):
+        raise ValueError("Labels must be nonempty and distinct")
+    return json.loads(json.dumps(config))
+
+
+def category_for(name, language):
+    if name in LABELS[language]:
+        return CATEGORIES[LABELS[language].index(name)]
+    if name == CLOUD_LABELS[language]:
+        return "codex.cloud.chats"
+    match = re.search(r"\[([^]]+)\] · (.+)$", name)
+    if not match:
+        raise ValueError("Unrecognized category")
+    return "remote." + match.group(1) + (".projects" if match.group(2) in {"项目", "Projects"} else ".chats")
+
+
+def safe_plan(snapshot, language="zh", mapping=None, config=None, budget=None):
+    """v4 preview only. Mappings are trusted confirmed IDs, never inferred translations."""
+    config = parse_config(config)
+    if language not in LABELS:
+        raise ValueError("Unknown language")
+    mapping = {} if mapping is None else mapping
+    if not isinstance(mapping, dict) or not all(stable(k) and stable(v) for k, v in mapping.items()):
+        raise ValueError("Invalid confirmed category mapping")
+    if len(set(mapping.values())) != len(mapping):
+        raise ValueError("A section cannot represent multiple categories")
+    if budget is not None and (type(budget) is not int or budget < 0):
+        raise ValueError("Budget must be a nonnegative integer")
+    doctor = diagnose(snapshot)
+    options = {"mapping": mapping, "config": config, "budget": budget}
+    base = build_plan(snapshot, language) if "schema_mismatch" not in doctor["reasons"] else {
+        "targets": [], "moves": [], "protected": [], "skipped": [],
+        "coverage": {"complete": False, "totalHistory": None}}
+    data = index(snapshot) if "schema_mismatch" not in doctor["reasons"] else None
+    targets, moves, skipped = [], [], list(base["skipped"])
+    for target in base["targets"]:
+        category = category_for(target["name"], language)
+        display = config.get("labels", {}).get(category, target["name"])
+        sid = mapping.get(category)
+        if sid:
+            state = "reuse" if sid in data["sections"] and sid not in DEFAULTS | {"pinned"} else "missing"
+        else:
+            ids = data["names"].get(display, [])
+            sid = ids[0] if len(ids) == 1 else None
+            state = "ambiguous" if len(ids) > 1 else "reuse" if ids else "create"
+        targets.append({"name": data["sections"][sid]["name"] if state == "reuse" else display,
+                        "displayLabel": display, "category": category, "sectionId": sid,
+                        "state": state, "operationId": fingerprint([RULE_VERSION, fingerprint(snapshot), "create", category])})
+    for m in base["moves"]:
+        category = category_for(m["targetName"], language)
+        target = next(t for t in targets if t["category"] == category)
+        source = m["key"].split(":", 1)[0]
+        excluded = (m.get("threadId", m.get("projectId")) in config.get("excludeIds", [])
+                    or m["key"] in config.get("excludeIds", [])
+                    or ("sources" in config and source not in config["sources"])
+                    or ("hosts" in config and source == "codex" and m.get("hostId", data["projects"].get(m["key"], {}).get("hostId")) not in config["hosts"]))
+        reason = "config_excluded" if excluded else "capability_degraded" if not doctor["canPlanMoves"] else "mapped_section_missing" if target["state"] == "missing" else "duplicate_target_name" if target["state"] == "ambiguous" else None
+        if reason:
+            skipped.append({"key": m["key"], "reason": reason})
+        else:
+            moves.append({**m, "targetName": target["name"], "category": category,
+                          "expectedTargetId": target["sectionId"],
+                          "operationId": fingerprint([RULE_VERSION, fingerprint(snapshot), "move", m["key"], m["fromSection"], category, target["sectionId"]])})
+    needed = {m["category"] for m in moves}
+    targets = [t for t in targets if t["state"] in {"reuse", "ambiguous", "missing"} or t["category"] in needed or config.get("createEmptyGroups", False)]
+    if not doctor["canPlanMoves"]:
+        targets = [t for t in targets if t["state"] != "create"]
+    if len({t["name"] for t in targets}) != len(targets):
+        raise ValueError("Labels collide across categories")
+    cloud_count = sum(r.get("kind") == "codex" and r.get("hostId") == "durable" for r in snapshot.get("sidebar", {}).get("threads", []))
+    estimate = 4 + cloud_count * 2 + len(moves) + sum(t["state"] == "create" for t in targets) + 2
+    previous_sort = data["preferences"].get("sorting", {}).get("chats") if data else None
+    sort = config.get("sort", "updated_at")
+    return {**base, "schemaVersion": 4, "ruleVersion": RULE_VERSION,
+            "capabilityVersion": CAPABILITY_VERSION, "language": language, "snapshotSha256": fingerprint(snapshot),
+            "options": options, "doctor": doctor, "mappingMode": "confirmed_ids" if mapping else "legacy_exact_label",
+            "targets": targets, "moves": moves, "skipped": skipped,
+            "sorting": {"chats": sort}, "sortingPreview": {"before": previous_sort, "after": sort, "requiresApproval": previous_sort != sort},
+            "budget": {"estimatedToolCalls": estimate, "cloudVerificationCalls": cloud_count * 2,
+                       "limit": budget, "sufficient": budget is None or budget >= estimate},
+            "coverage": {**base["coverage"], "proven": [], "protected": base["protected"],
+                         "skipped": skipped, "unverified": [{"key": m["key"], "reason": "pending_readback"} for m in moves],
+                         "scope": "recent_snapshot_only", "complete": False}}
+
+
+def validate_safe_plan(before, plan):
+    if plan.get("schemaVersion") != 4 or plan != safe_plan(before, plan.get("language", "zh"), **plan.get("options", {})):
+        raise ValueError("Plan does not match the before snapshot; regenerate it")
+
+
+def reconcile_receipt(before, current, plan, journal=None):
+    """Re-read after timeout; never repeat unknown writes or trust names as returned IDs."""
+    validate_safe_plan(before, plan)
+    journal = journal or {"schemaVersion": 2, "operations": []}
+    if journal.get("schemaVersion") not in {1, 2}:
+        raise ValueError("Unknown journal schema")
+    entries = array(journal, "operations")
+    if any(r.get("state") not in {"pending", "confirmed", "unknown"} for r in entries):
+        raise ValueError("Unknown operation state")
+    if len({r.get("operationId") for r in entries}) != len(entries):
+        raise ValueError("Duplicate journal operation")
+    allowed_ids = {r["operationId"] for r in plan["targets"] + plan["moves"]}
+    if any(r.get("operationId") not in allowed_ids for r in entries):
+        raise ValueError("Journal contains an operation outside this plan")
+    ledger = {r["operationId"]: r for r in entries}
+    new, old = index(current), index(before)
+    rows, destinations, retryable = [], {}, []
+    for target in plan["targets"]:
+        sid = target["sectionId"] if target["state"] == "reuse" else None
+        entry = ledger.get(target["operationId"], {})
+        if target["state"] == "create" and entry.get("state") == "confirmed":
+            candidate = entry.get("sectionId")
+            if candidate not in old["sections"] and candidate in new["sections"] and new["sections"][candidate]["name"] == target["name"]:
+                sid = candidate
+        if sid in new["sections"] and sid not in DEFAULTS | {"pinned"}:
+            destinations[target["category"]] = sid
+            state, reason = "confirmed", "id_readback"
+        elif target["state"] == "create" and not entry and not new["names"].get(target["name"]):
+            state, reason = "pending", "not_attempted"
+            retryable.append(target["operationId"])
+        else:
+            state, reason = "unknown", "creation_or_target_unverified"
+        rows.append({"operationId": target["operationId"], "state": state, "reason": reason, "sectionId": sid})
+    # Multiple category receipts pointing at one section are not identity evidence.
+    repeated = {sid for sid, count in Counter(destinations.values()).items() if count > 1}
+    destinations = {k: v for k, v in destinations.items() if v not in repeated}
+    confirmed = []
+    for move in plan["moves"]:
+        key, sid = move["key"], destinations.get(move["category"])
+        places = new["locations"].get(key, [])
+        row = new["chats" if move["entity"] == "chat" else "projects"].get(key)
+        prior = old["chats" if move["entity"] == "chat" else "projects"].get(key)
+        fields = ("id", "kind", "hostId", "projectId") if move["entity"] == "chat" else ("projectId", "projectKind", "hostId", "path")
+        entry = ledger.get(move["operationId"], {})
+        if key in new["pins"] or "pinned" in places or (move["entity"] == "chat" and row and row.get("projectId")):
+            state, reason = "unknown", "new_protection"
+        elif not row or key in new["duplicates"] or any(row.get(f) != prior.get(f) for f in fields):
+            state, reason = "unknown", "identity_or_metadata_changed"
+        elif (key in {r["key"] for r in old["cloud_resolved"]} and key not in {r["key"] for r in new["cloud_resolved"]}) or new["alias_hosts"] or blocked(key.split(":", 1)[0], row.get("hostId"), new):
+            state, reason = "unknown", "fresh_identity_unavailable"
+        elif sid and places == [sid]:
+            state, reason = "confirmed", "id_readback"
+            confirmed.append({**move, "confirmedTargetId": sid})
+        elif places != [move["fromSection"]]:
+            state, reason = "unknown", "user_moved"
+        elif entry.get("state") in {"unknown", "confirmed"}:
+            state, reason = "unknown", "write_outcome_unknown"
+        elif move["expectedTargetId"] and not sid:
+            state, reason = "unknown", "target_disappeared"
+        else:
+            state, reason = "pending", "not_attempted"
+            if sid: retryable.append(move["operationId"])
+        rows.append({"operationId": move["operationId"], "state": state, "reason": reason, "key": key, "sectionId": sid})
+    # Legacy verifier still guards protected metadata, unrelated placements and preference changes.
+    safety = verify(before, current, build_plan(before, plan["language"]))
+    safety_errors = [e for e in safety["errors"] if not e.startswith("destination_not_verified:") and e != "unrelated_section_order_changed"]
+    managed_ids = set(destinations.values())
+    def unrelated_ids(data):
+        return [sid for sid in data["sections"] if sid not in DEFAULTS | {"pinned"} and sid not in managed_ids]
+    if unrelated_ids(old) != unrelated_ids(new):
+        safety_errors.append("unrelated_section_order_changed")
+    if new["preferences"].get("sorting", {}).get("chats") != plan["sorting"]["chats"]:
+        safety_errors.append("requested_sort_not_verified")
+    if not diagnose(current)["canPlanMoves"]:
+        safety_errors.append("current_capability_degraded")
+    actual = journal.get("actualToolCalls")
+    if actual is not None and (type(actual) is not int or actual < 0):
+        raise ValueError("Actual tool count must be a nonnegative integer")
+    limit = plan["budget"]["limit"]
+    sufficient = plan["budget"]["sufficient"] and (limit is None or actual is None or actual <= limit)
+    blocking_unknown = [reason for reason in safety["unverified"] if reason not in {
+        "plan_contains_skipped_items", "managed_section_order_or_creation_not_verified", "recency_sorting_not_verified"}]
+    success = bool(plan["moves"]) and len(confirmed) == len(plan["moves"]) and not safety_errors and not blocking_unknown and sufficient
+    return {"schemaVersion": 2, "unverified": blocking_unknown, "planSha256": fingerprint(plan), "status": "confirmed" if success else "unverified",
+            "operations": rows, "retryable": retryable if sufficient and not safety_errors else [],
+            "confirmedMoves": confirmed if not safety_errors else [], "errors": safety_errors,
+            "budget": {**plan["budget"], "actualToolCalls": journal.get("actualToolCalls")},
+            "coverage": {**plan["coverage"], "proven": [m["key"] for m in confirmed] if not safety_errors else [],
+                         "unverified": [r for r in rows if r["state"] != "confirmed"], "complete": False}}
+
+
+def undo_plan(before, current, plan, receipt, can_move_back=False):
+    validate_safe_plan(before, plan)
+    if receipt.get("planSha256") != fingerprint(plan):
+        raise ValueError("Receipt belongs to a different plan")
+    if not can_move_back:
+        return {"schemaVersion": 1, "status": "unsupported", "moves": [], "reason": "move_to_original_section_not_supported"}
+    if not diagnose(current)["canPlanMoves"]:
+        return {"schemaVersion": 1, "status": "unsupported", "moves": [], "reason": "current_capability_degraded"}
+    new, old = index(current), index(before)
+    planned = {m["operationId"]: m for m in plan["moves"]}
+    moves, skipped = [], []
+    for move in receipt.get("confirmedMoves", []):
+        original = planned.get(move.get("operationId"))
+        if not original or {k: move.get(k) for k in original} != original:
+            raise ValueError("Receipt move differs from plan")
+        key = move["key"]
+        row = new["chats" if move["entity"] == "chat" else "projects"].get(key)
+        prior = old["chats" if move["entity"] == "chat" else "projects"].get(key)
+        places = new["locations"].get(key, [])
+        if places == [move["fromSection"]]:
+            skipped.append({"key": key, "reason": "already_undone"})
+        elif (not row or row != prior or key in new["pins"] or "pinned" in places
+              or key in new["duplicates"] or row.get("projectId") and move["entity"] == "chat"
+              or places != [move.get("confirmedTargetId")] or move["fromSection"] not in new["sections"]):
+            skipped.append({"key": key, "reason": "current_relation_or_protection_changed"})
+        else:
+            moves.append({**original, "fromSection": move["confirmedTargetId"], "expectedTargetId": move["fromSection"],
+                          "operationId": fingerprint(["undo", move["operationId"]])})
+    return {"schemaVersion": 1, "status": "preview", "moves": moves, "skipped": skipped,
+            "notice": "Limited reverse placement only; no section deletion or order restoration."}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -568,16 +842,45 @@ def main():
         checker.add_argument("--" + name, required=True, type=Path)
     for command in (planner, checker, capture, cloud, refresh):
         command.add_argument("--output", required=True, type=Path)
+    doctor_cli = sub.add_parser("doctor", help="Diagnose supplied schemas without accessing a client")
+    safe_cli = sub.add_parser("safe-plan", help="Generate a v4 preview")
+    for command in (doctor_cli, safe_cli):
+        command.add_argument("--input", required=True, type=Path)
+        command.add_argument("--output", required=True, type=Path)
+    safe_cli.add_argument("--language", choices=LABELS, default="zh")
+    safe_cli.add_argument("--config", type=Path)
+    safe_cli.add_argument("--mapping", type=Path)
+    safe_cli.add_argument("--budget", type=int)
+    receipt_cli = sub.add_parser("receipt", help="Reconcile current metadata with confirmed write IDs")
+    undo_cli = sub.add_parser("undo-plan", help="Preview limited confirmed reverse placements")
+    for command in (receipt_cli, undo_cli):
+        for name in ("before", "after", "plan", "output"):
+            command.add_argument("--" + name, required=True, type=Path)
+    receipt_cli.add_argument("--journal", type=Path)
+    undo_cli.add_argument("--receipt", required=True, type=Path)
+    undo_cli.add_argument("--can-move-back", action="store_true")
     args = parser.parse_args()
     read = lambda path: json.loads(path.read_text(encoding="utf-8-sig"))
     try:
-        if args.command == "refresh-check":
+        if args.command in {"doctor", "safe-plan", "receipt", "undo-plan"}:
+            inputs = [value for key, value in vars(args).items() if key != "output" and isinstance(value, Path)]
+        elif args.command == "refresh-check":
             inputs = [args.input] + ([args.previous] if args.previous else [])
         else:
             inputs = [args.input, args.state] if args.command == "capture-identity" else [args.input, args.reads] if args.command == "capture-cloud" else [args.input] if args.command == "plan" else [args.before, args.after, args.plan]
         if args.output.resolve() in {path.resolve() for path in inputs}:
             raise ValueError("Output must not overwrite an input snapshot")
-        if args.command == "refresh-check":
+        if args.command == "doctor":
+            result = diagnose(read(args.input))
+        elif args.command == "safe-plan":
+            result = safe_plan(read(args.input), args.language,
+                               mapping=read(args.mapping) if args.mapping else None,
+                               config=read(args.config) if args.config else None, budget=args.budget)
+        elif args.command == "receipt":
+            result = reconcile_receipt(read(args.before), read(args.after), read(args.plan), read(args.journal) if args.journal else None)
+        elif args.command == "undo-plan":
+            result = undo_plan(read(args.before), read(args.after), read(args.plan), read(args.receipt), args.can_move_back)
+        elif args.command == "refresh-check":
             result = refresh_check(read(args.input), read(args.previous) if args.previous else None)
         elif args.command == "capture-identity":
             result = capture_identity(read(args.input), args.state)
@@ -593,7 +896,7 @@ def main():
             handle.write("\n")
         print(json.dumps({"reportWritten": True, "status": result.get("status", "planned"),
                           "moves": len(result.get("moves", result.get("confirmedMoves", [])))}, ensure_ascii=False))
-        return 0 if result.get("status", "planned") in {"planned", "metadata_verified", "observed"} else 2
+        return 0 if result.get("status", "planned") in {"planned", "metadata_verified", "observed", "confirmed", "ready", "legacy", "preview"} else 2
     except (ValueError, KeyError, TypeError, OSError) as exc:
         print(f"Cannot produce report: {exc}", file=sys.stderr)
         return 1

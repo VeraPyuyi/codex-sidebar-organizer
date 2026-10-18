@@ -2,6 +2,16 @@
 
 The workflow was designed against native desktop tool schemas observed on 2026-10-11. It does not guarantee that another account, platform, client version, or session exposes those tools. Discovery and capability checks are mandatory at runtime.
 
+## Unreleased v4 synthetic validation — 2026-10-18
+
+The original 61 tests remain, with 17 independent protocol/release tests added (78 total). New tests were run RED before implementation: initial protocol 9 failures, release 2 failures, subsequent boundary regressions exposed malformed capabilities, unsafe undo capability handling, configured-label/order checking and actual budget exhaustion. Some compound cases passed immediately because existing protection already covered them; these were retained as regression evidence, not claimed as new RED behaviors.
+
+`python -m unittest discover -s tests -v` and `python scripts/build_release.py` are the acceptance commands. Builds unpack both ZIPs, check every manifest-listed digest and run synthetic CLI smoke. Release tests simulate duplicate plugin/standalone installation, upgrade and rollback in temporary directories; no native client is invoked. A BUILD_MANIFEST identifies source HEAD, dirty flag, Python version and every payload hash (excluding itself). Run the build on a clean commit for exact source attribution.
+
+Implemented scope: structural doctor and degraded reasons; v4 deterministic plans and confirmed-ID receipts; category mappings and on-demand targets; conflict-aware readback and limited undo previews; estimated/collector-supplied actual call budgets and scoped coverage; strict versioned config; provenance and isolated file-install regression. Missing capability envelopes are explicitly legacy, not proof of live compatibility. Unknown creation outcomes stay blocked until an exact returned ID is recovered. No helper calls host write interfaces or network. The v3 compatibility verifier remains name-based and must not be used to claim v4 confirmation.
+
+Host acceptance remains **pending/blocked**: real native grouping/moving, default-section undo support, native manager upgrade/rollback, deletion synchronization, complete history, UI folding/opening, and cross-device behavior. Historical observations below are prior release evidence only; they were not repeated for v4.
+
 ## 0.1.3 refresh checks
 
 The 61-test suite includes 12 new refresh tests: stable repeated reads, missing baseline, recent-window eviction, manual membership removal, source outage/recovery, unknown availability shape, content/timestamp projection, pins and project members, invalid/duplicate metadata, Codex-only changes, exclusive CLI output, and incomplete CLI status during outages. Both fresh-extracted ZIPs run `refresh-check` and assert zero actions/deletions and explicit unsupported deletion sync. The skill validator and isolated native plugin installation passed on Windows.
