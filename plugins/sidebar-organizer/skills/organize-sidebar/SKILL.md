@@ -9,6 +9,12 @@ Treat “archive / 自动归档” in this workflow as **filing into sidebar sec
 
 For refresh or web-deletion synchronization requests, first read [refresh checks and background monitoring](references/refresh.md). Route refresh-only requests to that observation-only workflow, not the organization steps below. Current native tools cannot force server refresh, prove deletion, or safely clean a deleted chat's local reference. State this limitation; never infer deletion from a recent-list omission. Explicit background requests can enable native heartbeat checks, defaulting to hourly, with no duplicate automation and no sidebar mutations. Do not describe monitoring as completed deletion synchronization.
 
+Use the [v4 safe protocol](references/safe-protocol.md) for new organization runs. Run `doctor` on the supplied native snapshot and discovered tool parameter names before planning; unknown adapters or schema changes disable moves. The protocol below supersedes older name-based helper examples: use `safe-plan`, then `receipt` with a private write journal. `plan`/`verify` are limited v3 compatibility commands only. No plan, receipt or mapping file grants authorization.
+
+Default to zero empty groups. Retain confirmed logical-category → section-ID mappings separately from display labels; language changes reuse those IDs, renamed sections retain their IDs, and missing IDs require renewed verification. Duplicate targets stay ambiguous. Without mappings report the legacy exact-label fallback. Never guess IDs from translated names.
+
+Estimate and announce tool budget before per-record cloud checks: each listed durable candidate needs two fresh reads across the run. If budget is insufficient, stop dependent writes and report unverified coverage. Recheck pins, membership and placement immediately before every write. Save pending/confirmed/unknown per operation; unknown creation outcomes must never be repeated blindly. A successful move requires fresh exact destination-ID readback. Scope success to confirmed moves and distinguish protected/skipped/unverified items; recent coverage is never account-wide completion. Undo is a separate preview for this run's confirmed, unchanged relationships only, and requires discovered support for moves to original sections.
+
 ## 1. Check capabilities and scope
 
 Discover the native desktop tools by their function names, allowing namespace prefixes to vary. Require `list_threads`, `list_projects`, `create_sidebar_section`, `move_thread_to_sidebar_section`, and `move_project_to_sidebar_section`. Read their live schemas before calling. Check for `reorder_sidebar_sections`, `update_sidebar_preferences`, and `reorder_section` separately.
@@ -32,7 +38,7 @@ Preserve all pinned items, all chats with a `projectId`, and items already in an
 Read [the tool contract and limits](references/native-tools.md). Optionally use the bundled **read-only** helper when Python 3.10+ is available:
 
 ```text
-python <skill-dir>/scripts/sidebar_plan.py plan --input <private-dir>/before.json --output <private-dir>/plan.json --language zh
+python <skill-dir>/scripts/sidebar_plan.py safe-plan --input <private-dir>/before.json --output <private-dir>/plan.json --language zh
 ```
 
 The input is `{"projects": <parsed list_projects object>, "sidebar": <parsed list_threads object>}`. Strip content fields as described in the reference. The helper creates a plan only; it never calls tools, edits the app, or changes files other than the requested report. If Python is unavailable, follow the same rules using native tools directly.
@@ -101,14 +107,14 @@ Execute mutations sequentially. Journal per-item outcomes privately. On errors o
 Read both lists again. Check observed items for unchanged pin order, project membership, project paths, and preserved custom placements; verify each attempted move is in its intended section. Use the helper if available:
 
 ```text
-python <skill-dir>/scripts/sidebar_plan.py verify --before <private-dir>/before.json --after <private-dir>/after.json --plan <private-dir>/plan.json --output <private-dir>/verification.json
+python <skill-dir>/scripts/sidebar_plan.py receipt --before <private-dir>/before.json --after <private-dir>/after.json --plan <private-dir>/plan.json --journal <private-dir>/journal.json --output <private-dir>/verification.json
 ```
 
 When the after-list still contains temporary IDs, repeat `capture-identity` with the **fresh** `raw-after.json` to create `after.json` before verification. Never reuse before-evidence for after-readback. Native IDs may become canonical naturally; if so no local evidence is needed. Missing rows, unresolved aliases, unavailable hosts, or failed readback are **unverified**, not successful. The helper checks metadata invariants only. Verify opening representative projects/chats through supported native navigation when feasible; otherwise report opening as untested.
 
-For Codex cloud records, repeat the native per-record reads and `capture-cloud` on the after snapshot, and again on every subsequent run. Verify `cloudReconciliation` on both sides; lack of fresh cloud evidence cannot count as a successful cloud regression. Native moves must use `source: codex`, `hostId: durable`, and the exact thread ID, regardless of the stored sidebar key prefix. Report cloud execution provenance separately from the unknown creation device.
+For Codex cloud records, repeat the native per-record reads and `capture-cloud` on the after snapshot, and again on every subsequent run. Inspect the v4 receipt's `unverified` reasons and per-operation reasons for missing fresh cloud evidence, and require every scoped cloud move in `confirmedMoves`. Lack of fresh cloud evidence cannot count as a successful cloud regression. Native moves must use `source: codex`, `hostId: durable`, and the exact thread ID, regardless of the stored sidebar key prefix. Report cloud execution provenance separately from the unknown creation device.
 
-Report `operationChecksPassed` separately from coverage: it requires unchanged observed invariants and verified planned destinations with no blocking unknowns. Pre-existing excluded records remain counted in `excludedItemCount`, `unverified`, and the overall `incomplete` status; they are not silently declared resolved. A repeat run must recompute from fresh observations and require zero new groups and zero moves for already-filed identities. Do not count skipped unresolved aliases as a successful alias regression test.
+Report `status`, `confirmedMoves`, `errors`, and `unverified` separately from `coverage.proven`, `coverage.protected`, `coverage.skipped`, and `coverage.unverified`. Overall `confirmed` requires this run's journaled moves and all requested group creations to be confirmed, unchanged observed invariants, verified requested sorting, and sufficient budget; report `budget.sufficient` and `budget.reason`. Excluded records remain in `coverage.skipped` even when the scoped operations are confirmed, and `coverage.complete` remains false. A repeat run must recompute from fresh observations and require zero new groups and zero moves for already-filed identities. Do not count skipped unresolved aliases as a successful alias regression test.
 
 Check for an authorized, supported history enumeration surface. Follow actual cursors or visible load-more controls only when exposed. Moving entries does not paginate `list_threads`; repeated calls to the same 50-item list do not prove historical coverage. If no permitted surface can enumerate older history, finish the known items and explicitly state “older history not covered; total unknown.” Do not read private databases or archived chats to fill this gap.
 

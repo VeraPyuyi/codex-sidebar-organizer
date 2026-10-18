@@ -17,6 +17,8 @@ Verified against the desktop tool surface on 2026-10-11. Discover current schema
 
 `source` is `codex` or `chatgpt`. Omit `hostId` for ChatGPT. The observed default section IDs are `threads`, `chats`, `projects`, `orbit`, and `agents`; `pinned` is protected. All other section IDs are treated as custom. If a future client adds default IDs, inspect its documented schema before extending the helper. The helper deliberately treats unknown section IDs as protected custom sections.
 
+New runs use the [v4 safe protocol](safe-protocol.md): structural capability diagnosis, on-demand targets, confirmed category IDs, strict configuration, budgets, per-operation journals and limited undo previews. The older name-based statements below describe v3 compatibility only. Do not use v3 verification as confirmed-ID evidence. No v4 real-client acceptance has been performed.
+
 ## Minimal private snapshot
 
 Save parsed tool objects, not the MCP content wrapper. Keep:

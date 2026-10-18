@@ -13,7 +13,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins/sidebar-organizer"
 SKILL = PLUGIN / "skills/organize-sidebar"
-SKILL_FILES = ["SKILL.md", "agents/openai.yaml", "references/native-tools.md", "references/refresh.md", "scripts/sidebar_plan.py"]
+SKILL_FILES = ["SKILL.md", "agents/openai.yaml", "references/native-tools.md", "references/refresh.md", "references/safe-protocol.md", "scripts/sidebar_plan.py"]
 
 
 def checked_bytes(path):
@@ -51,6 +51,26 @@ def validate():
     assert "$organize-sidebar" in yaml
     assert not any(marker in checked_bytes(SKILL / file).decode("utf-8") for file in SKILL_FILES for marker in ("[TODO", "TODO:"))
     return manifest["version"]
+
+
+def provenance(entries):
+    return {"schemaVersion": 1,
+            "buildSha": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+            "sourceDirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip()),
+            "pythonVersion": sys.version.split()[0],
+            "files": {name: hashlib.sha256(data).hexdigest() for name, data in sorted(entries.items())}}
+
+
+def verify_manifest(entries, manifest):
+    return manifest.get("files") == {name: hashlib.sha256(data).hexdigest() for name, data in entries.items()}
+
+
+def installation_inventory(root):
+    """Inspect only an explicitly supplied isolated installation tree."""
+    root = Path(root)
+    copies = [{"path": str(path.relative_to(root)), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+              for path in sorted(root.rglob("organize-sidebar/SKILL.md")) if not path.is_symlink()]
+    return {"status": "duplicate" if len(copies) > 1 else "single" if copies else "absent", "copies": copies}
 
 
 def write_zip(path, entries):
@@ -98,6 +118,22 @@ def smoke(path, script_relative):
         result_path = directory / "synthetic-verification.json"
         subprocess.run([sys.executable, str(script), "verify", "--before", str(before_path), "--after", str(after_path), "--plan", str(plan_path), "--output", str(result_path)], check=True, capture_output=True)
         assert json.loads(result_path.read_text(encoding="utf-8"))["status"] == "metadata_verified"
+        safe_path = directory / "v4-plan.json"
+        subprocess.run([sys.executable, str(script), "safe-plan", "--input", str(before_path), "--output", str(safe_path)], check=True, capture_output=True)
+        safe = json.loads(safe_path.read_text(encoding="utf-8"))
+        assert safe["schemaVersion"] == 4 and len(safe["targets"]) == 4
+        safe_after = fixture_module.simulate(before, safe)
+        safe_after_path = directory / "v4-after.json"
+        safe_after_path.write_text(json.dumps(safe_after), encoding="utf-8")
+        journal = {"schemaVersion": 2, "operations": [
+            {"operationId": t["operationId"], "state": "confirmed", "sectionId": next(s["sectionId"] for s in safe_after["sidebar"]["sections"] if s["name"] == t["name"])} for t in safe["targets"]]}
+        journal["operations"].extend({"operationId": m["operationId"], "state": "confirmed"} for m in safe["moves"])
+        journal_path = directory / "journal.json"
+        journal_path.write_text(json.dumps(journal), encoding="utf-8")
+        receipt_path = directory / "receipt.json"
+        subprocess.run([sys.executable, str(script), "receipt", "--before", str(before_path), "--after", str(safe_after_path), "--plan", str(safe_path), "--journal", str(journal_path), "--output", str(receipt_path)], capture_output=True)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert receipt["status"] == "confirmed" and len(receipt["confirmedMoves"]) == 5
         alias_native, alias_state = fixture_module.alias_fixture()
         alias_input, state_path = directory / "alias-native.json", directory / "local-state.json"
         alias_input.write_text(json.dumps(alias_native), encoding="utf-8")
@@ -165,7 +201,12 @@ def main():
     checksums = []
     for name, entries, script in jobs:
         path = output / name
+        manifest_path = name.split('-plugin-')[0] + '/BUILD_MANIFEST.json' if '-plugin-' in name else 'organize-sidebar/BUILD_MANIFEST.json'
+        manifest = provenance(entries)
+        entries = {**entries, manifest_path: (json.dumps(manifest, sort_keys=True, indent=2) + '\n').encode('utf-8')}
         write_zip(path, entries)
+        with zipfile.ZipFile(path) as archive:
+            assert verify_manifest({n: archive.read(n) for n in archive.namelist() if n != manifest_path}, json.loads(archive.read(manifest_path)))
         smoke(path, script)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         checksums.append(f"{digest}  {name}\n")
