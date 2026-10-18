@@ -8,7 +8,7 @@ A skills-only plugin that files desktop projects and chats into native sections 
 
 Offline `doctor`, `safe-plan`, `receipt`, and `undo-plan` are documented in the [safe protocol](plugins/sidebar-organizer/skills/organize-sidebar/references/safe-protocol.md). New previews create groups on demand, reuse confirmed category-to-section IDs across languages, validate limited configuration, estimate calls, reconcile pending/confirmed/unknown writes, and preview reverse moves only for this run's unchanged confirmed relationships. Existing `plan`/`verify` remain limited v3 compatibility interfaces with legacy label matching.
 
-Validation uses synthetic data and isolated temporary files: 78 unittest cases, two extracted ZIP smoke checks, and per-file manifest verification. This change has no real Codex-client validation. Native grouping, return-to-default support, deletion sync, folding/opening and cross-device behavior remain pending or unsupported. Plans/receipts grant no authorization; actual call counts come from a trusted collector, and full account history remains unknown.
+Validation uses synthetic data and isolated temporary files: 90 unittest cases, two extracted ZIP smoke checks, and per-file manifest verification. This change has no real Codex-client validation. Native grouping, return-to-default support, deletion sync, folding/opening and cross-device behavior remain pending or unsupported. Plans/receipts grant no authorization; actual call counts come from a trusted collector, and full account history remains unknown.
 
 ## Install
 

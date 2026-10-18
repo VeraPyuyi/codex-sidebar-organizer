@@ -10,7 +10,7 @@
 
 新增离线 `doctor`、`safe-plan`、`receipt` 与 `undo-plan`，详见[协议说明](plugins/sidebar-organizer/skills/organize-sidebar/references/safe-protocol.md)。默认按需创建非空目标组；已确认类别→section ID 映射可跨语言复用。支持有限版本化配置、工具预算、pending/confirmed/unknown 回执和仅针对本轮已确认且关系未变条目的撤销预览。旧 `plan`/`verify` 保留为 v3 兼容接口，仍是旧标签匹配行为，不提供 v4 ID 确认保证。
 
-此次验收只使用合成数据与隔离临时文件：78 项 unittest、两个 ZIP 解包冒烟和逐文件 manifest 检验。未运行真实 Codex 客户端；真实分组、默认分区移回、删除同步、折叠/打开与跨设备行为仍待宿主验收。计划/回执不是授权；预算和实际调用数由可信采集方提供，完整账户历史始终未知。
+此次验收只使用合成数据与隔离临时文件：90 项 unittest、两个 ZIP 解包冒烟和逐文件 manifest 检验。未运行真实 Codex 客户端；真实分组、默认分区移回、删除同步、折叠/打开与跨设备行为仍待宿主验收。计划/回执不是授权；预算和实际调用数由可信采集方提供，完整账户历史始终未知。
 
 ## 整理效果
 
