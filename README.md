@@ -6,11 +6,17 @@
 
 这是一个轻量技能插件：无需服务器、API Key 或额外 MCP 服务。**“自动归档”指分类收纳；不隐藏、删除或真正归档聊天。** 每次调用执行一轮，后续新增聊天可再次整理。也支持按需启用后台定时核对；目前不能自动同步网页端的删除。
 
+## 验收与兼容保护（本地未发布）
+
+[验收清单](docs/ACCEPTANCE_CHECKLIST.md)覆盖 6 项离线验证与 7 项宿主验证，每项含前置条件、步骤、证据、停止条件和禁止操作。机器版本为技能目录的 `scripts/acceptance_checklist.py`；运行 `--check docs/ACCEPTANCE_CHECKLIST.md plugins/sidebar-organizer/skills/organize-sidebar/references/acceptance-checklist.md` 可检查文档漂移。
+
+`acceptance-report --input after.json --before before.json --plan plan.json --receipt receipt.json --journal journal.json --output acceptance.json` 仅汇总私有文件证据；缺失证据不通过，50 条列表不产生全账户完成率。结构化 `inputSchema` 和旧 `parameters` 别名可用，旧参数列表及本地状态 `id` 适配记录 deprecated；未知工具、参数、返回结构与缺失 hostId 导致 doctor 降级并停止 v4 移动。真实分组、移动、回读、撤销、升级、UI 和删除同步须另行宿主验收；元数据不能证明 UI 可见或删除。
+
 ## 本地 v4 安全规划（尚未发布）
 
 新增离线 `doctor`、`safe-plan`、`receipt` 与 `undo-plan`，详见[协议说明](plugins/sidebar-organizer/skills/organize-sidebar/references/safe-protocol.md)。默认按需创建非空目标组；已确认类别→section ID 映射可跨语言复用。支持有限版本化配置、工具预算、pending/confirmed/unknown 回执和仅针对本轮已确认且关系未变条目的撤销预览。旧 `plan`/`verify` 保留为 v3 兼容接口，仍是旧标签匹配行为，不提供 v4 ID 确认保证。
 
-此次验收只使用合成数据与隔离临时文件：90 项 unittest、两个 ZIP 解包冒烟和逐文件 manifest 检验。未运行真实 Codex 客户端；真实分组、默认分区移回、删除同步、折叠/打开与跨设备行为仍待宿主验收。计划/回执不是授权；预算和实际调用数由可信采集方提供，完整账户历史始终未知。
+此次验收只使用合成数据与隔离临时文件：103 项 unittest、两个 ZIP 解包冒烟和逐文件 manifest 检验。未运行真实 Codex 客户端；真实分组、默认分区移回、删除同步、折叠/打开与跨设备行为仍待宿主验收。计划/回执不是授权；预算和实际调用数由可信采集方提供，完整账户历史始终未知。
 
 ## 整理效果
 

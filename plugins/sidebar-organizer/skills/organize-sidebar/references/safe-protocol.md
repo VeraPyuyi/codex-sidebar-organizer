@@ -14,6 +14,18 @@ Optional snapshot `capabilities`:
 
 The tools object contains schema parameter names discovered in the current session, including `hostId` for Codex chat routing. Its presence in the schema is required even though ChatGPT calls omit that argument. Namespace stripping is the collector's responsibility. Unknown adapters/default partitions, missing tools, renamed required fields and invalid snapshot layout disable moves. Tool discovery is structural, not a guarantee of native behavior. Missing client version stays `unknown`. Old snapshots remain readable with an explicit `legacy_snapshot` warning; add discovered capabilities before actual use. Unknown custom sections remain protected. Optional read/reorder/preferences tools must be checked separately before those actions.
 
+## Compatibility and acceptance
+
+See the [acceptance checklist](acceptance-checklist.md). `python scripts/acceptance_checklist.py` emits JSON; `--check references/acceptance-checklist.md` validates structure and exact document content.
+
+Each tool may use `{"inputSchema":{"type":"object","properties":{"limit":{"type":"integer"}},"required":["limit"]}}` (example: list_threads). Other known fields use string types. `parameters` is an explicit deprecated alias for `inputSchema`; supplying both is ambiguous and blocked. Legacy parameter-name lists remain usable with `deprecated:parameter_list`. The existing local-state `id` to `sectionId` evidence adapter records `deprecated:local-sidebar-custom-sections-v3.id`. There is no guessed tool-name or routing-argument alias. Namespace stripping remains the collector's responsibility.
+
+This conservative adapter rejects unknown schema keywords, outputSchema declarations, unknown arguments (including optional properties), and changed known-field types. Legacy parameter lists must contain exactly the known names without duplicates; no optional-extension allowlist is currently defined. Supplied return data must match the known snapshot layout. Diagnosis checks raw projects, recent threads and pinnedThreads before indexing can discard records. Every chat must explicitly contain projectId (null or a nonempty string); missing/renamed protection fields, invalid identities and missing Codex hostId degrade diagnosis and block v4 moves, with field locations reported. Preserve both explicit pin arrays and section membership. Fresh readback requires protection fields for previously observed chats; concurrent new chats remain outside the receipt's proven scope. Unsupported output schemas must be reviewed before extending the adapter; do not discard them to bypass diagnosis. Legacy snapshots remain offline-compatible, but actual use requires discovered capabilities. v3 is not a fallback for degraded diagnosis.
+
+`python scripts/sidebar_plan.py acceptance-report --input after.json --before before.json --plan plan.json --receipt receipt.json --journal journal.json --output acceptance.json`
+
+Only `--input` and `--output` are mandatory. Missing run evidence stays unverified. Full supplied evidence is reconciled again and compared to the receipt; confirmed scoped metadata appears as `run.metadata_readback`. This is not authenticated provenance or a host UI acceptance claim. Host checks remain unverified, or blocked by degraded capabilities. The report never asserts UI visibility, deletion or account-wide completion, including at the 50-item limit. Undo and upgrade need separate authorized host testing. Exit 0 means report generation succeeded, not that acceptance passed.
+
 ## Preview
 
 `python scripts/sidebar_plan.py safe-plan --input before.json --language zh --mapping mapping.json --config config.json --budget 100 --output plan.json`

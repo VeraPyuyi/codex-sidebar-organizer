@@ -559,7 +559,62 @@ TOOL_FIELDS = {
 }
 
 
-def diagnose(snapshot):
+def compatible_tool(spec, fields, reasons):
+    """Explicit native-v1 input contract; never guess renamed routing arguments."""
+    if isinstance(spec, list):
+        reasons.append("deprecated:parameter_list")
+        return (all(isinstance(v, str) for v in spec)
+                and len(spec) == len(fields) and set(spec) == set(fields))
+    if not isinstance(spec, dict) or set(spec) - {"inputSchema", "parameters"}:
+        return False
+    if "parameters" in spec:
+        if "inputSchema" in spec:
+            return False
+        reasons.append("deprecated:parameters")
+    schema = spec.get("inputSchema", spec.get("parameters"))
+    if not isinstance(schema, dict) or set(schema) - {"type", "properties", "required", "additionalProperties"}:
+        return False
+    props, required = schema.get("properties"), schema.get("required", [])
+    if schema.get("type") != "object" or not isinstance(props, dict) or not isinstance(required, list):
+        return False
+    if set(props) != set(fields):
+        return False
+    if not all(isinstance(v, str) for v in required) or set(required) - set(fields):
+        return False
+    return all(props.get(key) == {"type": "integer" if key == "limit" else "string"} for key in fields)
+
+
+def record_schema_issues(snapshot, membership_keys=None):
+    """Check raw records before indexing can discard routing/protection evidence."""
+    if not isinstance(snapshot, dict):
+        raise ValueError("Snapshot must be an object")
+    issues = []
+    for parent, collection, fields in (
+            ("projects", "projects", ("projectId", "projectKind")),
+            ("sidebar", "threads", ("id", "kind")),
+            ("sidebar", "pinnedThreads", ("id", "kind"))):
+        for position, row in enumerate(array(snapshot.get(parent), collection)):
+            path = f"{parent}.{collection}[{position}]"
+            if not isinstance(row, dict):
+                issues.append("invalid_record:" + path)
+                continue
+            required = list(fields)
+            if (row.get("kind") == "codex" or row.get("projectKind") in {"local", "remote"}):
+                required.append("hostId")
+            for field in required:
+                if field not in row:
+                    issues.append(f"missing_field:{path}.{field}")
+                elif not stable(row[field]):
+                    issues.append(f"invalid_field:{path}.{field}")
+            if parent == "sidebar" and (membership_keys is None or chat_key(row) in membership_keys):
+                if "projectId" not in row:
+                    issues.append(f"missing_field:{path}.projectId")
+                elif row["projectId"] is not None and not stable(row["projectId"]):
+                    issues.append(f"invalid_field:{path}.projectId")
+    return issues
+
+
+def diagnose(snapshot, *, membership_keys=None):
     """Inspect supplied metadata only; unknown versions are never inferred."""
     reasons, blocking = [], []
     caps = snapshot.get("capabilities") if isinstance(snapshot, dict) else None
@@ -580,10 +635,17 @@ def diagnose(snapshot):
         for name, fields in TOOL_FIELDS.items():
             if name not in tools:
                 blocking.append("missing_tool:" + name)
-            elif not isinstance(tools[name], list) or not set(fields).issubset(tools[name]):
+            elif not compatible_tool(tools[name], fields, reasons):
                 blocking.append("tool_schema_mismatch:" + name)
     try:
-        index(snapshot)
+        blocking.extend(record_schema_issues(snapshot, membership_keys))
+        data = index(snapshot)
+        if any(reason.endswith(".hostId") for reason in blocking):
+            blocking.append("missing_hostId")
+        if data["invalid"]:
+            blocking.append("unindexable_records")
+        if snapshot.get("identityEvidence", {}).get("source") == "local-sidebar-custom-sections-v3":
+            reasons.append("deprecated:local-sidebar-custom-sections-v3.id")
     except (ValueError, TypeError, KeyError):
         blocking.append("schema_mismatch")
     return {"schemaVersion": 1, "adapter": CAPABILITY_VERSION,
@@ -678,7 +740,7 @@ def safe_plan(snapshot, language="zh", mapping=None, config=None, budget=None):
         targets = [t for t in targets if t["state"] != "create"]
     if len({t["name"] for t in targets}) != len(targets):
         raise ValueError("Labels collide across categories")
-    cloud_count = sum(r.get("kind") == "codex" and r.get("hostId") == "durable" for r in snapshot.get("sidebar", {}).get("threads", []))
+    cloud_count = sum(r.get("kind") == "codex" and r.get("hostId") == "durable" for r in data["recent"]) if data else 0
     estimate = 4 + cloud_count * 2 + len(moves) + sum(t["state"] == "create" for t in targets) + 2
     previous_sort = data["preferences"].get("sorting", {}).get("chats") if data else None
     sort = config.get("sort", "updated_at")
@@ -777,7 +839,9 @@ def reconcile_receipt(before, current, plan, journal=None):
         safety_errors.append("unrelated_section_order_changed")
     if new["preferences"].get("sorting", {}).get("chats") != plan["sorting"]["chats"]:
         safety_errors.append("requested_sort_not_verified")
-    if not diagnose(current)["canPlanMoves"]:
+    # New records remain outside this receipt's scope; still validate every route,
+    # and require explicit protection metadata for all previously observed chats.
+    if not diagnose(current, membership_keys=set(old["chats"]))["canPlanMoves"]:
         safety_errors.append("current_capability_degraded")
     actual = journal.get("actualToolCalls")
     if actual is not None and (type(actual) is not int or actual < 0):
@@ -848,6 +912,33 @@ def undo_plan(before, current, plan, receipt, can_move_back=False):
             "notice": "Limited reverse placement only; no section deletion or order restoration."}
 
 
+def acceptance_report(snapshot, before=None, plan=None, receipt=None, journal=None):
+    """Summarize supplied private evidence, never claim host UI/deletion acceptance."""
+    doctor = diagnose(snapshot)
+    host_items = ["host.group", "host.move", "host.readback", "host.undo", "host.upgrade", "host.deletion-sync", "host.ui"]
+    verified, blocked = [], []
+    reasons = list(doctor["reasons"])
+    if not doctor["canPlanMoves"]:
+        blocked = ["host.group", "host.move", "host.readback", "host.undo"]
+    if all(value is not None for value in (before, plan, receipt, journal)):
+        try:
+            computed = reconcile_receipt(before, snapshot, plan, journal)
+            if computed == receipt and computed["status"] == "confirmed" and computed["confirmedMoves"]:
+                verified.append("run.metadata_readback")
+            else:
+                reasons.append("receipt_unverified_or_mismatch")
+        except (ValueError, KeyError, TypeError):
+            reasons.append("invalid_run_evidence")
+    else:
+        reasons.append("missing_run_evidence")
+    return {"schemaVersion": 1, "status": "observed", "verified": verified,
+            "unverified": [v for v in host_items if v not in blocked] + ([] if verified else ["run.metadata_readback"]),
+            "blocked": blocked, "reasons": reasons, "doctor": doctor,
+            "coverage": {"scope": "supplied_recent_snapshot_only", "complete": False, "accountCompletionRate": None},
+            "uiVisible": False, "deletionProven": False,
+            "notice": "Verified means supplied scoped metadata only. Metadata cannot prove UI visibility or deletion. Undo and upgrade require separate host acceptance; evidence provenance is the collector's responsibility."}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -885,10 +976,15 @@ def main():
     receipt_cli.add_argument("--journal", type=Path)
     undo_cli.add_argument("--receipt", required=True, type=Path)
     undo_cli.add_argument("--can-move-back", action="store_true")
+    report_cli = sub.add_parser("acceptance-report", help="Summarize supplied evidence without inferring UI or deletion")
+    report_cli.add_argument("--input", required=True, type=Path)
+    report_cli.add_argument("--output", required=True, type=Path)
+    for name in ("before", "plan", "receipt", "journal"):
+        report_cli.add_argument("--" + name, type=Path)
     args = parser.parse_args()
     read = lambda path: json.loads(path.read_text(encoding="utf-8-sig"))
     try:
-        if args.command in {"doctor", "safe-plan", "receipt", "undo-plan"}:
+        if args.command in {"doctor", "safe-plan", "receipt", "undo-plan", "acceptance-report"}:
             inputs = [value for key, value in vars(args).items() if key != "output" and isinstance(value, Path)]
         elif args.command == "refresh-check":
             inputs = [args.input] + ([args.previous] if args.previous else [])
@@ -896,7 +992,10 @@ def main():
             inputs = [args.input, args.state] if args.command == "capture-identity" else [args.input, args.reads] if args.command == "capture-cloud" else [args.input] if args.command == "plan" else [args.before, args.after, args.plan]
         if args.output.resolve() in {path.resolve() for path in inputs}:
             raise ValueError("Output must not overwrite an input snapshot")
-        if args.command == "doctor":
+        if args.command == "acceptance-report":
+            result = acceptance_report(read(args.input), **{name: read(getattr(args, name)) if getattr(args, name) else None
+                                       for name in ("before", "plan", "receipt", "journal")})
+        elif args.command == "doctor":
             result = diagnose(read(args.input))
         elif args.command == "safe-plan":
             result = safe_plan(read(args.input), args.language,
