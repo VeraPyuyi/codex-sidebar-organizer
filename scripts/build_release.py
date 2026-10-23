@@ -13,7 +13,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins/sidebar-organizer"
 SKILL = PLUGIN / "skills/organize-sidebar"
-SKILL_FILES = ["SKILL.md", "agents/openai.yaml", "references/native-tools.md", "references/refresh.md", "references/safe-protocol.md", "scripts/sidebar_plan.py"]
+SKILL_FILES = ["SKILL.md", "agents/openai.yaml", "references/native-tools.md", "references/refresh.md", "references/safe-protocol.md", "references/acceptance-checklist.md", "scripts/acceptance_checklist.py", "scripts/sidebar_plan.py"]
 
 
 def checked_bytes(path):
@@ -134,6 +134,15 @@ def smoke(path, script_relative):
         subprocess.run([sys.executable, str(script), "receipt", "--before", str(before_path), "--after", str(safe_after_path), "--plan", str(safe_path), "--journal", str(journal_path), "--output", str(receipt_path)], capture_output=True)
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         assert receipt["status"] == "confirmed" and len(receipt["confirmedMoves"]) == 5
+        acceptance_path = directory / "acceptance.json"
+        subprocess.run([sys.executable, str(script), "acceptance-report", "--input", str(safe_after_path),
+                        "--before", str(before_path), "--plan", str(safe_path), "--receipt", str(receipt_path),
+                        "--journal", str(journal_path), "--output", str(acceptance_path)], check=True, capture_output=True)
+        acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+        assert acceptance["verified"] == ["run.metadata_readback"]
+        assert not acceptance["uiVisible"] and not acceptance["deletionProven"]
+        subprocess.run([sys.executable, str(script.with_name("acceptance_checklist.py")), "--check",
+                        str(script.parent.parent / "references/acceptance-checklist.md")], check=True, capture_output=True)
         alias_native, alias_state = fixture_module.alias_fixture()
         alias_input, state_path = directory / "alias-native.json", directory / "local-state.json"
         alias_input.write_text(json.dumps(alias_native), encoding="utf-8")

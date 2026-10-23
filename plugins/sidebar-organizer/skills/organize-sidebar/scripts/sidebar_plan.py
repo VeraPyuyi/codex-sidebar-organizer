@@ -559,6 +559,28 @@ TOOL_FIELDS = {
 }
 
 
+def compatible_tool(spec, fields, reasons):
+    """Explicit native-v1 input contract; never guess renamed routing arguments."""
+    if isinstance(spec, list):
+        reasons.append("deprecated:parameter_list")
+        return all(isinstance(v, str) for v in spec) and set(fields).issubset(spec)
+    if not isinstance(spec, dict) or set(spec) - {"inputSchema", "parameters"}:
+        return False
+    if "parameters" in spec:
+        if "inputSchema" in spec:
+            return False
+        reasons.append("deprecated:parameters")
+    schema = spec.get("inputSchema", spec.get("parameters"))
+    if not isinstance(schema, dict) or set(schema) - {"type", "properties", "required", "additionalProperties"}:
+        return False
+    props, required = schema.get("properties"), schema.get("required", [])
+    if schema.get("type") != "object" or not isinstance(props, dict) or not isinstance(required, list):
+        return False
+    if not all(isinstance(v, str) for v in required) or set(required) - set(fields):
+        return False
+    return all(props.get(key) == {"type": "integer" if key == "limit" else "string"} for key in fields)
+
+
 def diagnose(snapshot):
     """Inspect supplied metadata only; unknown versions are never inferred."""
     reasons, blocking = [], []
@@ -580,10 +602,16 @@ def diagnose(snapshot):
         for name, fields in TOOL_FIELDS.items():
             if name not in tools:
                 blocking.append("missing_tool:" + name)
-            elif not isinstance(tools[name], list) or not set(fields).issubset(tools[name]):
+            elif not compatible_tool(tools[name], fields, reasons):
                 blocking.append("tool_schema_mismatch:" + name)
     try:
-        index(snapshot)
+        data = index(snapshot)
+        rows = data["recent"] + list(data["chats"].values())
+        if any(r.get("kind") == "codex" and not stable(r.get("hostId")) for r in rows) or any(
+                r.get("projectKind") in {"local", "remote"} and not stable(r.get("hostId")) for r in data["projects"].values()):
+            blocking.append("missing_hostId")
+        if snapshot.get("identityEvidence", {}).get("source") == "local-sidebar-custom-sections-v3":
+            reasons.append("deprecated:local-sidebar-custom-sections-v3.id")
     except (ValueError, TypeError, KeyError):
         blocking.append("schema_mismatch")
     return {"schemaVersion": 1, "adapter": CAPABILITY_VERSION,
@@ -848,6 +876,33 @@ def undo_plan(before, current, plan, receipt, can_move_back=False):
             "notice": "Limited reverse placement only; no section deletion or order restoration."}
 
 
+def acceptance_report(snapshot, before=None, plan=None, receipt=None, journal=None):
+    """Summarize supplied private evidence, never claim host UI/deletion acceptance."""
+    doctor = diagnose(snapshot)
+    host_items = ["host.group", "host.move", "host.readback", "host.undo", "host.upgrade", "host.deletion-sync", "host.ui"]
+    verified, blocked = [], []
+    reasons = list(doctor["reasons"])
+    if not doctor["canPlanMoves"]:
+        blocked = ["host.group", "host.move", "host.readback", "host.undo"]
+    if all(value is not None for value in (before, plan, receipt, journal)):
+        try:
+            computed = reconcile_receipt(before, snapshot, plan, journal)
+            if computed == receipt and computed["status"] == "confirmed" and computed["confirmedMoves"]:
+                verified.append("run.metadata_readback")
+            else:
+                reasons.append("receipt_unverified_or_mismatch")
+        except (ValueError, KeyError, TypeError):
+            reasons.append("invalid_run_evidence")
+    else:
+        reasons.append("missing_run_evidence")
+    return {"schemaVersion": 1, "status": "observed", "verified": verified,
+            "unverified": [v for v in host_items if v not in blocked] + ([] if verified else ["run.metadata_readback"]),
+            "blocked": blocked, "reasons": reasons, "doctor": doctor,
+            "coverage": {"scope": "supplied_recent_snapshot_only", "complete": False, "accountCompletionRate": None},
+            "uiVisible": False, "deletionProven": False,
+            "notice": "Verified means supplied scoped metadata only. Metadata cannot prove UI visibility or deletion. Undo and upgrade require separate host acceptance; evidence provenance is the collector's responsibility."}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -885,10 +940,15 @@ def main():
     receipt_cli.add_argument("--journal", type=Path)
     undo_cli.add_argument("--receipt", required=True, type=Path)
     undo_cli.add_argument("--can-move-back", action="store_true")
+    report_cli = sub.add_parser("acceptance-report", help="Summarize supplied evidence without inferring UI or deletion")
+    report_cli.add_argument("--input", required=True, type=Path)
+    report_cli.add_argument("--output", required=True, type=Path)
+    for name in ("before", "plan", "receipt", "journal"):
+        report_cli.add_argument("--" + name, type=Path)
     args = parser.parse_args()
     read = lambda path: json.loads(path.read_text(encoding="utf-8-sig"))
     try:
-        if args.command in {"doctor", "safe-plan", "receipt", "undo-plan"}:
+        if args.command in {"doctor", "safe-plan", "receipt", "undo-plan", "acceptance-report"}:
             inputs = [value for key, value in vars(args).items() if key != "output" and isinstance(value, Path)]
         elif args.command == "refresh-check":
             inputs = [args.input] + ([args.previous] if args.previous else [])
@@ -896,7 +956,10 @@ def main():
             inputs = [args.input, args.state] if args.command == "capture-identity" else [args.input, args.reads] if args.command == "capture-cloud" else [args.input] if args.command == "plan" else [args.before, args.after, args.plan]
         if args.output.resolve() in {path.resolve() for path in inputs}:
             raise ValueError("Output must not overwrite an input snapshot")
-        if args.command == "doctor":
+        if args.command == "acceptance-report":
+            result = acceptance_report(read(args.input), **{name: read(getattr(args, name)) if getattr(args, name) else None
+                                       for name in ("before", "plan", "receipt", "journal")})
+        elif args.command == "doctor":
             result = diagnose(read(args.input))
         elif args.command == "safe-plan":
             result = safe_plan(read(args.input), args.language,
