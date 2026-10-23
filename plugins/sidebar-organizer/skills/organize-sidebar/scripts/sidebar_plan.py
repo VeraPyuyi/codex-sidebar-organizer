@@ -563,7 +563,8 @@ def compatible_tool(spec, fields, reasons):
     """Explicit native-v1 input contract; never guess renamed routing arguments."""
     if isinstance(spec, list):
         reasons.append("deprecated:parameter_list")
-        return all(isinstance(v, str) for v in spec) and set(fields).issubset(spec)
+        return (all(isinstance(v, str) for v in spec)
+                and len(spec) == len(fields) and set(spec) == set(fields))
     if not isinstance(spec, dict) or set(spec) - {"inputSchema", "parameters"}:
         return False
     if "parameters" in spec:
@@ -576,12 +577,44 @@ def compatible_tool(spec, fields, reasons):
     props, required = schema.get("properties"), schema.get("required", [])
     if schema.get("type") != "object" or not isinstance(props, dict) or not isinstance(required, list):
         return False
+    if set(props) != set(fields):
+        return False
     if not all(isinstance(v, str) for v in required) or set(required) - set(fields):
         return False
     return all(props.get(key) == {"type": "integer" if key == "limit" else "string"} for key in fields)
 
 
-def diagnose(snapshot):
+def record_schema_issues(snapshot, membership_keys=None):
+    """Check raw records before indexing can discard routing/protection evidence."""
+    if not isinstance(snapshot, dict):
+        raise ValueError("Snapshot must be an object")
+    issues = []
+    for parent, collection, fields in (
+            ("projects", "projects", ("projectId", "projectKind")),
+            ("sidebar", "threads", ("id", "kind")),
+            ("sidebar", "pinnedThreads", ("id", "kind"))):
+        for position, row in enumerate(array(snapshot.get(parent), collection)):
+            path = f"{parent}.{collection}[{position}]"
+            if not isinstance(row, dict):
+                issues.append("invalid_record:" + path)
+                continue
+            required = list(fields)
+            if (row.get("kind") == "codex" or row.get("projectKind") in {"local", "remote"}):
+                required.append("hostId")
+            for field in required:
+                if field not in row:
+                    issues.append(f"missing_field:{path}.{field}")
+                elif not stable(row[field]):
+                    issues.append(f"invalid_field:{path}.{field}")
+            if parent == "sidebar" and (membership_keys is None or chat_key(row) in membership_keys):
+                if "projectId" not in row:
+                    issues.append(f"missing_field:{path}.projectId")
+                elif row["projectId"] is not None and not stable(row["projectId"]):
+                    issues.append(f"invalid_field:{path}.projectId")
+    return issues
+
+
+def diagnose(snapshot, *, membership_keys=None):
     """Inspect supplied metadata only; unknown versions are never inferred."""
     reasons, blocking = [], []
     caps = snapshot.get("capabilities") if isinstance(snapshot, dict) else None
@@ -605,11 +638,12 @@ def diagnose(snapshot):
             elif not compatible_tool(tools[name], fields, reasons):
                 blocking.append("tool_schema_mismatch:" + name)
     try:
+        blocking.extend(record_schema_issues(snapshot, membership_keys))
         data = index(snapshot)
-        rows = data["recent"] + list(data["chats"].values())
-        if any(r.get("kind") == "codex" and not stable(r.get("hostId")) for r in rows) or any(
-                r.get("projectKind") in {"local", "remote"} and not stable(r.get("hostId")) for r in data["projects"].values()):
+        if any(reason.endswith(".hostId") for reason in blocking):
             blocking.append("missing_hostId")
+        if data["invalid"]:
+            blocking.append("unindexable_records")
         if snapshot.get("identityEvidence", {}).get("source") == "local-sidebar-custom-sections-v3":
             reasons.append("deprecated:local-sidebar-custom-sections-v3.id")
     except (ValueError, TypeError, KeyError):
@@ -706,7 +740,7 @@ def safe_plan(snapshot, language="zh", mapping=None, config=None, budget=None):
         targets = [t for t in targets if t["state"] != "create"]
     if len({t["name"] for t in targets}) != len(targets):
         raise ValueError("Labels collide across categories")
-    cloud_count = sum(r.get("kind") == "codex" and r.get("hostId") == "durable" for r in snapshot.get("sidebar", {}).get("threads", []))
+    cloud_count = sum(r.get("kind") == "codex" and r.get("hostId") == "durable" for r in data["recent"]) if data else 0
     estimate = 4 + cloud_count * 2 + len(moves) + sum(t["state"] == "create" for t in targets) + 2
     previous_sort = data["preferences"].get("sorting", {}).get("chats") if data else None
     sort = config.get("sort", "updated_at")
@@ -805,7 +839,9 @@ def reconcile_receipt(before, current, plan, journal=None):
         safety_errors.append("unrelated_section_order_changed")
     if new["preferences"].get("sorting", {}).get("chats") != plan["sorting"]["chats"]:
         safety_errors.append("requested_sort_not_verified")
-    if not diagnose(current)["canPlanMoves"]:
+    # New records remain outside this receipt's scope; still validate every route,
+    # and require explicit protection metadata for all previously observed chats.
+    if not diagnose(current, membership_keys=set(old["chats"]))["canPlanMoves"]:
         safety_errors.append("current_capability_degraded")
     actual = journal.get("actualToolCalls")
     if actual is not None and (type(actual) is not int or actual < 0):

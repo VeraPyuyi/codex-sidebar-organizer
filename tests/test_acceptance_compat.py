@@ -90,7 +90,7 @@ class AcceptanceTests(unittest.TestCase):
     def test_missing_evidence_and_fifty_limit_never_pass(self):
         self.assertTrue(hasattr(p, 'acceptance_report'))
         s = fixture()
-        s['sidebar']['threads'] = [{'id': f'synthetic-{i}', 'kind': 'chatgpt'} for i in range(50)]
+        s['sidebar']['threads'] = [{'id': f'synthetic-{i}', 'kind': 'chatgpt', 'projectId': None} for i in range(50)]
         s['sidebar']['sections'][4]['itemKeys'] = [f'chatgpt:conversation:synthetic-{i}' for i in range(50)]
         result = p.acceptance_report(s)
         self.assertEqual(result['verified'], [])
